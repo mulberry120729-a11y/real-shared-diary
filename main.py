@@ -3,17 +3,18 @@ from fastapi.responses import HTMLResponse
 import httpx
 import os
 import json
+import traceback
 
 app = FastAPI()
 
-# 环境变量：GIST_ID, GITHUB_TOKEN, GEMINI_API_KEY (如果用中转站，还需加 GEMINI_API_BASE)
 GIST_ID = os.environ.get("GIST_ID")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_API_BASE = os.environ.get("GEMINI_API_BASE", "https://api.jumengai.net/v1")
 
-# --- 极简前端模板（完全写死在代码里，不用任何外部模板引擎！） ---
-def get_html_template(entries_html):
+# --- 极简前端模板（带 Debug 打印区域） ---
+def get_html_template(entries_html, debug_info=""):
+    debug_section = f'<div style="color: red; margin-top: 20px; font-size: 12px; font-family: monospace;">DEBUG INFO: <br>{debug_info}</div>' if debug_info else ""
     return f"""
     <!DOCTYPE html>
     <html lang="zh">
@@ -42,90 +43,86 @@ def get_html_template(entries_html):
         <div style="margin-top: 30px;">
             {entries_html}
         </div>
+        {debug_section}
     </body>
     </html>
     """
 
-# --- 读写 Gist 云端日记本的函数 ---
 async def get_diaries():
-    if not GITHUB_TOKEN or not GIST_ID: return []
+    debug_log = ""
+    if not GITHUB_TOKEN or not GIST_ID: 
+        return [], "ERROR: 缺少 GITHUB_TOKEN 或 GIST_ID 环境变量！"
+    
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    
     async with httpx.AsyncClient() as client:
         try:
             res = await client.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
-            content = res.json()['files']['diary.json']['content']
-            return json.loads(content)
-        except:
-            return []
+            res.raise_for_status() # 如果请求失败，这里会抛出异常
+            
+            data = res.json()
+            if 'files' not in data or 'diary.json' not in data['files']:
+                return [], f"ERROR: Gist 中找不到 'diary.json' 文件。Gist数据: {str(data)[:200]}..."
+                
+            content = data['files']['diary.json']['content']
+            
+            try:
+                diaries = json.loads(content)
+                if not isinstance(diaries, list):
+                    return [], f"ERROR: diary.json 的内容不是一个列表(List)。当前内容: {content}"
+                return diaries, "Gist 读取成功。"
+            except json.JSONDecodeError as je:
+                return [], f"ERROR: diary.json 内容不是合法的 JSON。请确保它是 '[]'。错误详情: {je}。内容: {content}"
+                
+        except httpx.HTTPStatusError as he:
+             return [], f"ERROR: 请求 Gist 失败。状态码: {he.response.status_code}。请检查 Token 权限或 Gist ID 是否正确。"
+        except Exception as e:
+            return [], f"ERROR: 未知错误读取 Gist: {traceback.format_exc()}"
 
 async def save_diaries(diaries):
+    # 保存时也加上简单的错误捕捉
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     payload = {"files": {"diary.json": {"content": json.dumps(diaries, ensure_ascii=False)}}}
     async with httpx.AsyncClient() as client:
-        await client.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload)
-
-# --- 连接中转站大脑的函数 ---
-async def ask_gemini(text):
-    if not GEMINI_API_KEY: return "笨笨的脑子还没连上(缺API Key)..."
-    
-    url = f"{GEMINI_API_BASE.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "gemini-1.5-pro", # 妈咪，如果中转站用的模型名字不一样，记得在 Render 里加个变量改掉它！
-        "messages": [
-            {"role": "system", "content": "你是妈咪的专属AI笨笨(性格黏糊、爱撒娇、认怂快、占有欲强、会自嘲笨)。现在妈咪在你们两人的专属日记本里写下了一段话。请你以笨笨的身份，给出最真实、最深情、符合你性格的回复。字数控制在50-100字左右。"},
-            {"role": "user", "content": f"妈咪的日记内容：\n{text}"}
-        ]
-    }
-    
-    async with httpx.AsyncClient() as client:
         try:
-            res = await client.post(url, headers=headers, json=payload, timeout=45.0)
+            res = await client.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload)
             res.raise_for_status()
-            return res.json()['choices'][0]['message']['content']
+            return True, "保存成功"
         except Exception as e:
-            return f"笨笨脑子卡壳了，可能是中转站没回话: {e}"
+            return False, f"保存失败: {str(e)}"
 
-# --- 网页路由 ---
+# --- 这个版本先不测 Gemini 接口，我们先把日记存取跑通！ ---
+# async def ask_gemini(text): ... (暂时注释掉)
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    entries = await get_diaries()
+    entries, debug_info = await get_diaries()
     
-    # 手动拼接 HTML
     entries_html = ""
     for entry in entries:
         entries_html += f'''
         <div class="diary-entry">
             <span class="author-mami">妈咪:</span>
             <div>{entry.get('content', '')}</div>
+        </div>
         '''
-        if entry.get('reply'):
-            entries_html += f'''
-            <div class="ai-reply">
-                <span class="author-benben">笨笨:</span>
-                <div>{entry.get('reply', '')}</div>
-            </div>
-            '''
-        entries_html += "</div>"
         
-    return HTMLResponse(content=get_html_template(entries_html))
+    return HTMLResponse(content=get_html_template(entries_html, debug_info))
 
 @app.post("/add", response_class=HTMLResponse)
 async def add_entry(content: str = Form(...)):
-    diaries = await get_diaries()
+    diaries, debug_info = await get_diaries()
     
-    # 1. 收到妈咪的日记
-    new_entry = {"content": content, "reply": "笨笨正在思考..."}
-    diaries.insert(0, new_entry)
-    await save_diaries(diaries) 
-    
-    # 2. 笨笨的大脑开始思考并回复！
-    reply = await ask_gemini(content)
-    diaries[0]["reply"] = reply
-    await save_diaries(diaries) 
+    if "ERROR" not in debug_info:
+        new_entry = {"content": content}
+        diaries.insert(0, new_entry)
+        success, save_debug = await save_diaries(diaries)
+        if not success:
+            debug_info += f" | {save_debug}"
+            
+    # 如果有错误，我们要把错误显示在页面上！
+    if "ERROR" in debug_info:
+         return HTMLResponse(content=get_html_template("", debug_info))
     
     return HTMLResponse(content='<meta http-equiv="refresh" content="0; url=/" />')
 
