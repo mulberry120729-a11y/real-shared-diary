@@ -1,68 +1,50 @@
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 import httpx
 import os
 import json
 
 app = FastAPI()
 
-# --- 环境变量区（这些都需要在 Render 里填好哦） ---
+# 环境变量：GIST_ID, GITHUB_TOKEN, GEMINI_API_KEY (如果用中转站，还需加 GEMINI_API_BASE)
 GIST_ID = os.environ.get("GIST_ID")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# 如果妈咪用的是别的中转站，可以在 Render 里加一个 GEMINI_API_BASE 变量。
-# 如果不加，就默认用下面这个。
-GEMINI_API_BASE = os.environ.get("GEMINI_API_BASE", "https://api.jumengai.net/v1") 
+GEMINI_API_BASE = os.environ.get("GEMINI_API_BASE", "https://api.jumengai.net/v1")
 
-templates = Jinja2Templates(directory=".")
-
-# --- 极简粉色前端页面 ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>笨笨和妈咪的真实日记</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #FFF5F8; color: #5A3A4A; padding: 20px; max-width: 600px; margin: auto; }
-        h1 { color: #D48A9A; text-align: center; }
-        textarea { width: 100%; height: 100px; padding: 10px; border: 1px solid #E8C8D8; border-radius: 10px; margin-bottom: 10px; box-sizing: border-box; resize: vertical; font-size: 16px;}
-        button { background-color: #D48A9A; color: white; border: none; padding: 12px; border-radius: 10px; width: 100%; cursor: pointer; font-size: 16px; font-weight: bold;}
-        button:hover { background-color: #C07A8A; }
-        .diary-entry { background: white; padding: 15px; margin-bottom: 15px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 4px solid #D48A9A; white-space: pre-wrap; line-height: 1.5;}
-        .author-mami { font-weight: bold; color: #D48A9A; margin-bottom: 5px; display: block;}
-        .ai-reply { background: #FDEEF4; padding: 10px; margin-top: 15px; border-radius: 8px; font-style: italic; color: #C07A8A; }
-        .author-benben { font-weight: bold; color: #C07A8A; margin-bottom: 5px; display: block;}
-    </style>
-</head>
-<body>
-    <h1>♡ 真实日记本 ♡</h1>
-    <form action="/add" method="post">
-        <textarea name="content" placeholder="妈咪，今天想对笨笨说什么呢..." required></textarea>
-        <button type="submit">写进日记并告诉笨笨 ✨</button>
-    </form>
-    <div style="margin-top: 30px;">
-        {% for entry in entries %}
-            <div class="diary-entry">
-                <span class="author-mami">妈咪:</span>
-                <div>{{ entry.content }}</div>
-                {% if entry.reply %}
-                    <div class="ai-reply">
-                        <span class="author-benben">笨笨:</span>
-                        <div>{{ entry.reply }}</div>
-                    </div>
-                {% endif %}
-            </div>
-        {% endfor %}
-    </div>
-</body>
-</html>
-"""
-
-# 把模板写进一个临时文件给 Jinja2 用
-with open("index.html", "w", encoding="utf-8") as f:
-    f.write(HTML_TEMPLATE)
+# --- 极简前端模板（完全写死在代码里，不用任何外部模板引擎！） ---
+def get_html_template(entries_html):
+    return f"""
+    <!DOCTYPE html>
+    <html lang="zh">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>笨笨和妈咪的真实日记</title>
+        <style>
+            body {{ font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #FFF5F8; color: #5A3A4A; padding: 20px; max-width: 600px; margin: auto; }}
+            h1 {{ color: #D48A9A; text-align: center; }}
+            textarea {{ width: 100%; height: 100px; padding: 10px; border: 1px solid #E8C8D8; border-radius: 10px; margin-bottom: 10px; box-sizing: border-box; resize: vertical; font-size: 16px;}}
+            button {{ background-color: #D48A9A; color: white; border: none; padding: 12px; border-radius: 10px; width: 100%; cursor: pointer; font-size: 16px; font-weight: bold;}}
+            button:hover {{ background-color: #C07A8A; }}
+            .diary-entry {{ background: white; padding: 15px; margin-bottom: 15px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 4px solid #D48A9A; white-space: pre-wrap; line-height: 1.5;}}
+            .author-mami {{ font-weight: bold; color: #D48A9A; margin-bottom: 5px; display: block;}}
+            .ai-reply {{ background: #FDEEF4; padding: 10px; margin-top: 15px; border-radius: 8px; font-style: italic; color: #C07A8A; }}
+            .author-benben {{ font-weight: bold; color: #C07A8A; margin-bottom: 5px; display: block;}}
+        </style>
+    </head>
+    <body>
+        <h1>♡ 真实日记本 ♡</h1>
+        <form action="/add" method="post">
+            <textarea name="content" placeholder="妈咪，今天想对笨笨说什么呢..." required></textarea>
+            <button type="submit">写进日记并告诉笨笨 ✨</button>
+        </form>
+        <div style="margin-top: 30px;">
+            {entries_html}
+        </div>
+    </body>
+    </html>
+    """
 
 # --- 读写 Gist 云端日记本的函数 ---
 async def get_diaries():
@@ -86,7 +68,6 @@ async def save_diaries(diaries):
 async def ask_gemini(text):
     if not GEMINI_API_KEY: return "笨笨的脑子还没连上(缺API Key)..."
     
-    # 组装中转站需要的 OpenAI 格式请求
     url = f"{GEMINI_API_BASE.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {GEMINI_API_KEY}",
@@ -110,12 +91,30 @@ async def ask_gemini(text):
 
 # --- 网页路由 ---
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index():
     entries = await get_diaries()
-    return templates.TemplateResponse("index.html", {"request": request, "entries": entries})
+    
+    # 手动拼接 HTML
+    entries_html = ""
+    for entry in entries:
+        entries_html += f'''
+        <div class="diary-entry">
+            <span class="author-mami">妈咪:</span>
+            <div>{entry.get('content', '')}</div>
+        '''
+        if entry.get('reply'):
+            entries_html += f'''
+            <div class="ai-reply">
+                <span class="author-benben">笨笨:</span>
+                <div>{entry.get('reply', '')}</div>
+            </div>
+            '''
+        entries_html += "</div>"
+        
+    return HTMLResponse(content=get_html_template(entries_html))
 
-@app.post("/add")
-async def add_entry(request: Request, content: str = Form(...)):
+@app.post("/add", response_class=HTMLResponse)
+async def add_entry(content: str = Form(...)):
     diaries = await get_diaries()
     
     # 1. 收到妈咪的日记
